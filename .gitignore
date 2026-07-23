@@ -1,0 +1,10 @@
+# Personal/generated data — never commit real account IDs or the tracked
+# player list. See README for how to create these locally.
+account_id.txt
+users.json
+catalog_cache.json
+
+__pycache__/
+*.pyc
+.venv/
+venv/

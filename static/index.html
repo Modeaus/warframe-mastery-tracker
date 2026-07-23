@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Warframe Mastery Tracker</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <button id="player-panel-toggle" type="button">&#128101; Players</button>
+    <div id="player-panel" class="player-panel hidden">
+        <h2>Track a player</h2>
+        <p>
+            Drag this to your bookmarks bar, then click it while logged into
+            warframe.com to auto-fill your account ID below:
+            <br />
+            <a id="bookmarklet-link" class="bookmarklet"
+               href="#"
+               onclick="return false;">Add to Warframe Tracker</a>
+        </p>
+        <p>
+            Or find it manually by logging into
+            <a href="https://www.warframe.com/api/user-data" target="_blank" rel="noopener">warframe.com/api/user-data</a>
+            and copying the <code>user_id</code> value.
+        </p>
+        <div class="player-form">
+            <input type="text" id="new-account-id" placeholder="Account ID (24-character hex)" maxlength="24" />
+            <button id="add-player-btn">Add</button>
+        </div>
+        <div id="player-form-error" class="form-error hidden"></div>
+        <div id="player-list"></div>
+    </div>
+
+    <header id="summary">
+        <h1>Loading&hellip;</h1>
+    </header>
+
+    <div class="two-col">
+        <main id="categories-column">
+            <h2 class="column-heading">Missing</h2>
+            <div id="categories"></div>
+
+            <h2 class="column-heading">In Progress <span class="section-hint">(owned, not yet fully ranked)</span></h2>
+            <div id="in-progress-categories"></div>
+        </main>
+
+        <section id="farming-section">
+            <h2>Targeted Farming</h2>
+            <p class="section-hint">Sources ranked by how many of your missing items they can drop.</p>
+            <div id="farming-targets"></div>
+        </section>
+    </div>
+
+    <div id="item-modal" class="modal hidden">
+        <div class="modal-content">
+            <button id="modal-close" class="modal-close">&times;</button>
+            <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <div id="category-modal" class="modal hidden">
+        <div class="modal-content category-modal-content">
+            <button id="category-modal-close" class="modal-close">&times;</button>
+            <h2 id="category-modal-title"></h2>
+            <div id="category-modal-body"></div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

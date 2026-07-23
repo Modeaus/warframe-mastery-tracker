@@ -1,0 +1,13 @@
+[Unit]
+Description=Warframe Mastery Tracker backend
+After=network.target
+
+[Service]
+Type=simple
+User=warframe
+WorkingDirectory=/home/warframe/warframe-tracker
+ExecStart=/home/warframe/.local/bin/gunicorn -w 1 -b 127.0.0.1:8420 app:app
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

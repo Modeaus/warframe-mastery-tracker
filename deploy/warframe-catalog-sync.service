@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh Warframe item catalog cache from WFCD
+
+[Service]
+Type=oneshot
+User=warframe
+WorkingDirectory=/home/warframe/warframe-tracker
+ExecStart=/usr/bin/python3 /home/warframe/warframe-tracker/catalog_sync.py

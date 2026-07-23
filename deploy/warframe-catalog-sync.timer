@@ -1,0 +1,10 @@
+[Unit]
+Description=Run warframe-catalog-sync daily
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1d
+Unit=warframe-catalog-sync.service
+
+[Install]
+WantedBy=timers.target
