@@ -3,6 +3,11 @@
 account_id.txt
 users.json
 catalog_cache.json
+arcanes_cache.json
+checked_parts.json
+owned_items.json
+arcanes.json
+*.bak*
 
 __pycache__/
 *.pyc

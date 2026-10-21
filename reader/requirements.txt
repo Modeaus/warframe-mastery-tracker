@@ -1,0 +1,5 @@
+rapidocr
+onnxruntime
+numpy
+pillow
+python-xlib
