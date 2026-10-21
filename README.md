@@ -28,6 +28,28 @@ the most of your missing items at once.
   chance rather than trusting WFCD's raw per-tier `rarity` field, which
   drifts with refinement (see comments in `catalog_sync.py`).
 
+## What it tracks
+
+- **Missing items**, with every drop location, and **Targeted Farming**:
+  the sources that drop the most of your missing items at once.
+- **Parts found** for missing items. Tick parts off in an item's popup, or
+  let the screen reader do it. Recipes that need two of a part (Kestrel
+  Prime's Blades, akimbo Barrels) show `Blade 1/2` until both are found.
+  Found parts drop out of Targeted Farming.
+- **Ready to craft**: items whose every part is found get a highlighted row,
+  and their category an "N ready" pill. (Crafting resources aren't tracked.)
+- **In Progress**: owned items not yet at max rank. This includes gear
+  that's built but never leveled, which the profile API can't see (no XP
+  yet), recorded from inventory scans.
+- **Arcanes**: copies held per rank against what's needed to max (rank 5 =
+  21 copies; Exodia, Pax, Virtuos and Residual arcanes max at rank 3 = 10), with where to get
+  each one: best drop locations, vendors and Loid's collections.
+
+Parts, built-but-unleveled items and arcanes aren't in the public profile
+data. They come from ticking boxes or from the optional
+[screen reader](reader/README.md), which OCRs in-game inventory screens and
+posts what it sees.
+
 ## Multi-player support
 
 Anyone can add a player by account ID (Settings → Players panel). A
@@ -55,7 +77,11 @@ pip install --user flask gunicorn
    under gunicorn/systemd for real deployment — see `deploy/`.
 
 `users.json` (gitignored) stores the account IDs of everyone you've added
-via the Players panel; it's created automatically on first use.
+via the Players panel; it's created automatically on first use. Likewise
+gitignored and created on first use: `checked_parts.json` (parts found,
+`{component: count}` per item), `owned_items.json` (built-but-unleveled
+gear) and `arcanes.json` (arcane stacks per rank). `catalog_sync.py` also
+writes `arcanes_cache.json`, the arcane catalog.
 
 ## Deployment reference
 
@@ -86,6 +112,13 @@ production:
   rendering.
 - Keep this on a **single gunicorn worker** — see the note under
   Deployment reference above.
+- The write endpoints (`POST /api/checked-parts`, `/api/owned-items`,
+  `/api/arcanes`) are unauthenticated and rate-limited like the rest. Anyone
+  who can reach the site can edit any tracked player's farming notes. That's
+  fine for a personal or friends instance, since they only affect this
+  tracker's own bookkeeping and never the game or account. Put it behind
+  auth (e.g. nginx basic auth on `/api/` POSTs) if that matters for yours.
+  Inputs are validated against the catalog and bounded.
 
 ## Credits
 

@@ -225,10 +225,36 @@ def classify_relic_rarity(chance):
     return "Rare"
 
 
-def extract_acquisition(item: dict) -> list:
+def resolve_components(item: dict, components_by_name: dict) -> list:
+    """WFCD (Oct 2026) moved component details (name, drops) out of each
+    item into Components.json; items now only carry {uniqueName, itemCount}
+    references. Resolve those back into full component dicts. Inline
+    components (the older format) pass through unchanged."""
+    resolved = []
+    for comp in item.get("components", []) or []:
+        if "name" in comp:
+            resolved.append(comp)
+        elif comp.get("uniqueName") in components_by_name:
+            resolved.append(components_by_name[comp["uniqueName"]])
+    return resolved
+
+
+def component_counts(item: dict, components_by_name: dict) -> dict:
+    """How many of each named component the recipe needs (Kestrel Prime
+    takes 2 Blades, Akmagnus Prime 2 Magnus Prime). Only counts above 1 are
+    stored; everything else defaults to 1."""
+    counts = {}
+    for ref in item.get("components", []) or []:
+        comp = ref if "name" in ref else components_by_name.get(ref.get("uniqueName"))
+        if comp and comp.get("name"):
+            counts[comp["name"]] = counts.get(comp["name"], 0) + (ref.get("itemCount") or 1)
+    return {name: n for name, n in counts.items() if n > 1}
+
+
+def extract_acquisition(item: dict, components_by_name: dict) -> list:
     """Collect drop locations from an item's components (or itself)."""
     sources = []
-    for comp in item.get("components", []) or [item]:
+    for comp in resolve_components(item, components_by_name) or [item]:
         for drop in comp.get("drops", []) or []:
             sources.append({
                 "component": comp.get("name", item.get("name")),
@@ -259,14 +285,31 @@ def extract_acquisition(item: dict) -> list:
 
 def build_catalog() -> dict:
     catalog = {}
+    components_by_name = {c["uniqueName"]: c for c in fetch_category("Components")}
+    items_by_category = {cat: fetch_category(cat) for cat in CATEGORIES}
+
+    # Some recipes take a whole weapon as a component (Akmagnus Prime needs
+    # 2x Magnus Prime). Those aren't in Components.json; expose the weapon
+    # under its own name with its parts' drops, matching the old inline
+    # format where the component was named after the weapon.
+    for cat_items in items_by_category.values():
+        for other in cat_items:
+            components_by_name.setdefault(other["uniqueName"], {
+                "name": other.get("name"),
+                "drops": [
+                    d for c in resolve_components(other, components_by_name)
+                    for d in c.get("drops", []) or []
+                ],
+            })
+
     for cat in CATEGORIES:
-        for item in fetch_category(cat):
+        for item in items_by_category[cat]:
             unique_name = item["uniqueName"]
             if unique_name in EXCLUDED_UNIQUE_NAMES:
                 continue
             if not (item.get("masterable") or unique_name in MANUAL_INCLUDE_UNIQUE_NAMES):
                 continue
-            sources = extract_acquisition(item)
+            sources = extract_acquisition(item, components_by_name)
             max_rank = resolve_max_rank(item)
             divisor = affinity_divisor(cat, item)
             catalog[unique_name] = {
@@ -278,6 +321,7 @@ def build_catalog() -> dict:
                 "wikiaUrl": item.get("wikiaUrl"),
                 "buildable": bool(item.get("buildPrice") or item.get("marketCost")),
                 "sources": sources,
+                "componentCounts": component_counts(item, components_by_name),
                 "maxRank": max_rank,
                 "masteryXpCap": divisor * max_rank ** 2,
                 "acquisitionNote": ACQUISITION_NOTES.get(unique_name),
@@ -316,6 +360,118 @@ def build_catalog() -> dict:
     return catalog
 
 
+# ---------------------------------------------------------------- arcanes
+ARCANES_CACHE_PATH = Path(__file__).parent / "arcanes_cache.json"
+MAX_ARCANE_SOURCES = 12
+
+# Where to buy arcanes. WFCD has drop tables but no vendor data, so this is
+# hand-built from wiki.warframe.com/w/Arcane_Enhancement (read 2026-10-21).
+# Any arcane can also come from Loid's dissolution collections (Vosfor) once
+# Whispers in the Walls is done; that's noted on the page, not per arcane.
+_VENDORS = {
+    "Vox Solaris (Little Duck, Fortuna)": [
+        "Magus Revert", "Magus Lockdown", "Magus Destruct", "Magus Melt", "Magus Glitch",
+        "Magus Repair", "Magus Overload", "Magus Firewall", "Magus Drive", "Magus Anomaly",
+        "Magus Accelerant", "Virtuos Forge", "Virtuos Trojan", "Virtuos Spike", "Virtuos Surge"],
+    "The Quills (Onkko, Cetus)": [
+        "Magus Vigor", "Magus Husk", "Magus Elevate", "Magus Nourish", "Magus Replenish",
+        "Magus Cadence", "Virtuos Null", "Virtuos Tempo", "Virtuos Shadow", "Virtuos Ghost",
+        "Virtuos Strike", "Exodia Triumph", "Exodia Valor"],
+    "Ostron (Cetus)": [
+        "Exodia Brave", "Exodia Force", "Exodia Hunt", "Exodia Might", "Exodia Triumph",
+        "Exodia Valor", "Magus Replenish", "Magus Cadence", "Virtuos Strike"],
+    "Solaris United (Rude Zuud, Fortuna)": ["Pax Bolt", "Pax Charge", "Pax Seeker", "Pax Soar"],
+    "The Hex (Höllvania)": [
+        "Arcane Bellicose", "Arcane Camisado", "Arcane Crepuscular", "Arcane Impetus",
+        "Arcane Truculence"],
+    "Roathe (The Descendia)": [
+        "Arcane Circumvent", "Arcane Concentration", "Arcane Expertise", "Arcane Persistence"],
+    "Ordis shop": ["Arcane Battery", "Arcane Ice Storm"],
+    "Otak (Unearth Citrine shop)": ["Arcane Double Back", "Arcane Steadfast"],
+    "Acrithis (Steel Path Circuit)": ["Arcane Intention", "Arcane Power Ramp", "Arcane Reaper"],
+    "Archimedean Yonta": ["Arcane Blessing", "Arcane Rise"],
+    "Kaya": ["Arcane Escapist"],
+    "Hunhow": ["Arcane Sculptor"],
+}
+ARCANE_VENDORS = {}
+for _vendor, _names in _VENDORS.items():
+    for _name in _names:
+        ARCANE_VENDORS.setdefault(_name, []).append(_vendor)
+# Loid collections the wiki names members for (the lists there are partial).
+ARCANE_COLLECTIONS = {
+    "Cavia": ["Melee Fortification", "Melee Retaliation", "Melee Exposure", "Melee Influence",
+              "Melee Animosity", "Melee Vortex"],
+    "Necralisk": ["Arcane Double Back", "Arcane Steadfast", "Primary Plated Round",
+                  "Secondary Encumber", "Secondary Kinship"],
+}
+ARCANE_COLLECTION_PREFIXES = {
+    "Necralisk": ("Theorem ", "Residual "),
+    "Holdfasts": ("Molt ", "Cascadia ", "Emergence ", "Eternal ", "Conjunction "),
+    "Ostron": ("Exodia ",),
+    "Solaris": ("Pax ",),
+}
+
+
+# In WFCD but absent from the in-game Arcanes manager (not even on its
+# "Incomplete" tab for a player who owns none of them), checked 2026-10-21.
+LEGACY_ARCANES = {
+    "Arcane Defense", "Arcane Detoxifier", "Arcane Liquid", "Arcane Protection",
+    "Arcane Shield", "Arcane Survival", "Arcane Temperance",
+}
+# In the game (seen in the Arcanes manager, 5 rank diamonds) but not yet in
+# WFCD's data as of 2026-10-21. A WFCD entry with the same name replaces
+# these automatically once it appears.
+MANUAL_ARCANES = ["Zid-An Asheir", "Zid-An Haras", "Zid-An Osbok", "Zid-An Sek-Eel", "Zid-An Uskos"]
+
+
+def arcane_collections(name: str) -> list:
+    found = [c for c, names in ARCANE_COLLECTIONS.items() if name in names]
+    found += [c for c, prefixes in ARCANE_COLLECTION_PREFIXES.items()
+              if name.startswith(prefixes) and c not in found]
+    return found
+
+
+def build_arcanes() -> dict:
+    """Every rankable arcane: max rank (levelStats has one entry per rank,
+    rank 0 included), copies needed to max (a rank-r copy is built from
+    (r+1)(r+2)/2 copies), best drop sources and known vendors."""
+    arcanes = {}
+    for item in fetch_category("Arcanes"):
+        max_rank = len(item.get("levelStats") or []) - 1
+        if max_rank < 1 or item["name"] in LEGACY_ARCANES:
+            continue  # unrankable placeholders / no longer in the game
+        best = {}
+        for drop in item.get("drops") or []:
+            loc = drop.get("location")
+            if loc and (loc not in best or (drop.get("chance") or 0) > (best[loc]["chance"] or 0)):
+                best[loc] = {"location": loc, "chance": drop.get("chance"), "rarity": drop.get("rarity")}
+        sources = sorted(best.values(), key=lambda d: -(d["chance"] or 0))
+        arcanes[item["uniqueName"]] = {
+            "name": item["name"],
+            "type": item.get("type") or "Arcane",
+            "rarity": item.get("rarity"),
+            "imageName": item.get("imageName"),
+            "maxRank": max_rank,
+            "copiesToMax": (max_rank + 1) * (max_rank + 2) // 2,
+            "sources": sources[:MAX_ARCANE_SOURCES],
+            "sourceCount": len(sources),
+            "vendors": ARCANE_VENDORS.get(item["name"], []),
+            "collections": arcane_collections(item["name"]),
+            "wikiaUrl": item.get("wikiaUrl"),
+        }
+    known = {a["name"] for a in arcanes.values()}
+    for name in MANUAL_ARCANES:
+        if name in known:
+            continue
+        arcanes[f"manual:{name}"] = {
+            "name": name, "type": "Arcane", "rarity": None, "imageName": None,
+            "maxRank": 5, "copiesToMax": 21, "sources": [], "sourceCount": 0,
+            "vendors": [], "collections": [],
+            "wikiaUrl": "https://wiki.warframe.com/w/Special:Search?search=" + name.replace(" ", "+"),
+        }
+    return arcanes
+
+
 def sync_icons(catalog: dict):
     """Download each item's icon once and cache it locally so the frontend
     never hits an external host on page load. Skips anything already
@@ -341,9 +497,24 @@ def sync_icons(catalog: dict):
 
 def main():
     catalog = build_catalog()
+    # Guard against upstream schema changes silently wiping acquisition
+    # data (happened Oct 2026 when components moved to Components.json).
+    with_sources = sum(1 for i in catalog.values() if i["sources"])
+    if with_sources < len(catalog) // 4:
+        raise SystemExit(
+            f"refusing to write catalog: only {with_sources}/{len(catalog)} "
+            "items have drop sources -- WFCD schema likely changed again"
+        )
     CACHE_PATH.write_text(json.dumps(catalog, indent=2))
     print(f"cached {len(catalog)} masterable items -> {CACHE_PATH}")
     sync_icons(catalog)
+
+    arcanes = build_arcanes()
+    if len(arcanes) < 100:
+        raise SystemExit(f"refusing to write arcanes: only {len(arcanes)} -- WFCD schema changed?")
+    ARCANES_CACHE_PATH.write_text(json.dumps(arcanes, indent=2))
+    print(f"cached {len(arcanes)} arcanes -> {ARCANES_CACHE_PATH}")
+    sync_icons(arcanes)
 
 
 if __name__ == "__main__":

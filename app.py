@@ -11,6 +11,9 @@ APP_DIR = Path(__file__).parent
 CATALOG_PATH = APP_DIR / "catalog_cache.json"
 USERS_PATH = APP_DIR / "users.json"
 CHECKED_PARTS_PATH = APP_DIR / "checked_parts.json"
+OWNED_ITEMS_PATH = APP_DIR / "owned_items.json"
+ARCANES_CATALOG_PATH = APP_DIR / "arcanes_cache.json"
+ARCANES_PATH = APP_DIR / "arcanes.json"
 DEFAULT_ACCOUNT_ID = (APP_DIR / "account_id.txt").read_text().strip()
 
 PROFILE_CACHE_SECONDS = 300
@@ -126,6 +129,7 @@ def resolve_owned_xp(item: dict, unique_name: str, owned_xp: dict):
     return max(xps) if xps else None
 
 _catalog = json.loads(CATALOG_PATH.read_text())
+_arcanes = json.loads(ARCANES_CATALOG_PATH.read_text()) if ARCANES_CATALOG_PATH.exists() else {}
 _profile_cache = {}  # account_id -> {"data": ..., "fetched_at": ...}
 
 
@@ -149,8 +153,39 @@ def load_checked_parts() -> dict:
     return {}
 
 
+def required_count(item: dict, component: str) -> int:
+    return item.get("componentCounts", {}).get(component, 1)
+
+
+def found_counts(item: dict, stored) -> dict:
+    """{component: how many found} for one item. Entries saved before part
+    counts existed are plain lists of components, read as fully found."""
+    if isinstance(stored, list):
+        return {c: required_count(item, c) for c in stored}
+    return dict(stored or {})
+
+
+def complete_components(item: dict, found: dict) -> list:
+    return sorted(c for c, n in found.items() if n >= required_count(item, c))
+
+
 def save_checked_parts(data: dict):
     CHECKED_PARTS_PATH.write_text(json.dumps(data, indent=2))
+
+
+def load_owned_items() -> dict:
+    """{account_id: [item_unique_name, ...]} -- items seen in the player's
+    in-game inventory (by the screen reader) that the profile API can't
+    report yet: its XPInfo only lists items that have earned affinity, so a
+    freshly built, never-leveled item looks unowned. Once the item earns
+    XP the profile's own data takes over and the entry is moot."""
+    if OWNED_ITEMS_PATH.exists():
+        return json.loads(OWNED_ITEMS_PATH.read_text())
+    return {}
+
+
+def save_owned_items(data: dict):
+    OWNED_ITEMS_PATH.write_text(json.dumps(data, indent=2))
 
 
 def fetch_profile(account_id: str) -> dict:
@@ -189,6 +224,8 @@ def _evict_stale_profile_cache_entries(now: float):
 def build_mastery_payload(account_id: str) -> dict:
     profile = fetch_profile(account_id)["Results"][0]
     owned_xp = {x["ItemType"]: x["XP"] for x in profile["LoadOutInventory"]["XPInfo"]}
+    for unique_name in load_owned_items().get(account_id, []):
+        owned_xp.setdefault(unique_name, 0)
     checked_parts = load_checked_parts().get(account_id, {})
 
     missing_by_category = {}
@@ -234,7 +271,9 @@ def build_mastery_payload(account_id: str) -> dict:
             key=lambda s: (s["chance"] is None, -(s["chance"] or 0)),
         )
 
-        item_checked_components = checked_parts.get(unique_name, [])
+        item_found = found_counts(item, checked_parts.get(unique_name))
+        item_checked_components = complete_components(item, item_found)
+        item_components = {s["component"] for s in sources}
 
         for dc in display_categories:
             missing_by_category.setdefault(dc, []).append({
@@ -248,6 +287,8 @@ def build_mastery_payload(account_id: str) -> dict:
                 "sources": sources,
                 "acquisitionNote": item.get("acquisitionNote"),
                 "checkedComponents": item_checked_components,
+                "foundCounts": item_found,
+                "componentCounts": {c: required_count(item, c) for c in item_components},
             })
 
         for s in sources:
@@ -353,6 +394,8 @@ def mastery():
 def build_category_payload(account_id: str, category_name: str) -> dict:
     profile = fetch_profile(account_id)["Results"][0]
     owned_xp = {x["ItemType"]: x["XP"] for x in profile["LoadOutInventory"]["XPInfo"]}
+    for unique_name in load_owned_items().get(account_id, []):
+        owned_xp.setdefault(unique_name, 0)
 
     items = []
     for unique_name, item in _catalog.items():
@@ -403,6 +446,7 @@ def toggle_checked_part():
     unique_name = (body.get("uniqueName") or "").strip()
     component = (body.get("component") or "").strip()
     checked = bool(body.get("checked"))
+    count = body.get("count")
 
     if not ACCOUNT_ID_RE.match(account_id):
         abort(400, "invalid account id")
@@ -414,23 +458,163 @@ def toggle_checked_part():
     if component not in valid_components:
         abort(400, "unknown component for this item")
 
+    # "count" (the screen reader, or a partial manual entry) sets how many
+    # of a multi-copy part were found; "checked" alone means all/none.
+    required = required_count(item, component)
+    if count is not None:
+        if not isinstance(count, int) or isinstance(count, bool):
+            abort(400, "count must be an integer")
+        found = max(0, min(count, required))
+    else:
+        found = required if checked else 0
+
     all_checked = load_checked_parts()
     account_checked = all_checked.setdefault(account_id, {})
-    components = set(account_checked.get(unique_name, []))
-    if checked:
-        components.add(component)
+    counts = found_counts(item, account_checked.get(unique_name))
+    if found:
+        counts[component] = found
     else:
-        components.discard(component)
+        counts.pop(component, None)
 
-    if components:
-        account_checked[unique_name] = sorted(components)
+    if counts:
+        account_checked[unique_name] = counts
     else:
         account_checked.pop(unique_name, None)
     if not account_checked:
         all_checked.pop(account_id, None)
 
     save_checked_parts(all_checked)
-    return jsonify({"uniqueName": unique_name, "checkedComponents": sorted(components)})
+    return jsonify({
+        "uniqueName": unique_name,
+        "checkedComponents": complete_components(item, counts),
+        "foundCounts": counts,
+    })
+
+
+@app.route("/api/owned-items", methods=["POST"])
+def set_owned_item():
+    if rate_limited():
+        abort(429, "too many requests, slow down")
+    body = request.get_json(silent=True) or {}
+    account_id = (body.get("accountId") or "").strip()
+    unique_name = (body.get("uniqueName") or "").strip()
+    owned = bool(body.get("owned", True))
+
+    if not ACCOUNT_ID_RE.match(account_id):
+        abort(400, "invalid account id")
+    if unique_name not in _catalog:
+        abort(400, "unknown item")
+
+    all_owned = load_owned_items()
+    items = set(all_owned.get(account_id, []))
+    if owned:
+        items.add(unique_name)
+    else:
+        items.discard(unique_name)
+    if items:
+        all_owned[account_id] = sorted(items)
+    else:
+        all_owned.pop(account_id, None)
+    save_owned_items(all_owned)
+    return jsonify({"uniqueName": unique_name, "owned": owned})
+
+
+def load_arcanes() -> dict:
+    """{account_id: {arcane_unique_name: {"ranks": {rank: count}}}} -- the
+    player's arcane stacks as read off the in-game Arcanes inventory by the
+    screen reader. Not in the profile API at all."""
+    if ARCANES_PATH.exists():
+        return json.loads(ARCANES_PATH.read_text())
+    return {}
+
+
+def arcane_copies(ranks: dict) -> int:
+    """A rank-r arcane is fused from (r+1)(r+2)/2 copies (rank 5 = 21)."""
+    return sum(int(n) * (int(r) + 1) * (int(r) + 2) // 2 for r, n in ranks.items())
+
+
+@app.route("/api/arcanes")
+def arcanes():
+    if rate_limited():
+        abort(429, "too many requests, slow down")
+    account_id = request.args.get("player", DEFAULT_ACCOUNT_ID)
+    if not ACCOUNT_ID_RE.match(account_id):
+        abort(400, "invalid account id")
+    owned = load_arcanes().get(account_id, {})
+
+    rows = []
+    for unique_name, a in _arcanes.items():
+        ranks = owned.get(unique_name, {}).get("ranks", {})
+        copies = arcane_copies(ranks)
+        best_rank = max((int(r) for r, n in ranks.items() if n), default=None)
+        maxed = best_rank == a["maxRank"]
+        rows.append({
+            "uniqueName": unique_name,
+            **{k: a[k] for k in ("name", "type", "rarity", "imageName", "maxRank", "copiesToMax",
+                                 "sources", "sourceCount", "vendors", "collections", "wikiaUrl")},
+            "ranks": ranks,
+            "copies": copies,
+            "bestRank": best_rank,
+            "status": "maxed" if maxed else ("ranking" if copies else "notOwned"),
+            "copiesNeeded": 0 if maxed else max(0, a["copiesToMax"] - copies),
+        })
+    rows.sort(key=lambda r: r["name"])
+    summary = {k: sum(1 for r in rows if r["status"] == k) for k in ("maxed", "ranking", "notOwned")}
+    return jsonify({"accountId": account_id, "scanned": bool(owned), "summary": summary, "arcanes": rows})
+
+
+@app.route("/api/arcanes", methods=["POST"])
+def set_arcanes():
+    """Batch update: {accountId, updates: [{uniqueName, ranks: {rank: count},
+    merge}]} -- one screen of arcanes per request, so a scan isn't throttled
+    by the per-IP rate limit."""
+    if rate_limited():
+        abort(429, "too many requests, slow down")
+    body = request.get_json(silent=True) or {}
+    account_id = (body.get("accountId") or "").strip()
+    updates = body.get("updates")
+    if not ACCOUNT_ID_RE.match(account_id):
+        abort(400, "invalid account id")
+    if not isinstance(updates, list) or not 0 < len(updates) <= 200:
+        abort(400, "updates must be a list of 1-200 entries")
+
+    cleaned = []
+    for u in updates:
+        if not isinstance(u, dict):
+            abort(400, "bad update")
+        arcane = _arcanes.get(u.get("uniqueName"))
+        ranks = u.get("ranks")
+        if arcane is None or not isinstance(ranks, dict):
+            abort(400, "unknown arcane or bad ranks")
+        clean = {}
+        for r, n in ranks.items():
+            try:
+                r_i = int(r)
+            except (TypeError, ValueError):
+                abort(400, "bad rank")
+            if not (0 <= r_i <= arcane["maxRank"]) or not isinstance(n, int) or isinstance(n, bool) or not 0 <= n <= 9999:
+                abort(400, "rank or count out of range")
+            clean[str(r_i)] = n
+        cleaned.append((u["uniqueName"], clean, bool(u.get("merge"))))
+
+    all_arcanes = load_arcanes()
+    account = all_arcanes.setdefault(account_id, {})
+    result = {}
+    for unique_name, clean, merge in cleaned:
+        # merge: the arcane's tiles may continue off-screen, so only the
+        # ranks seen are updated; otherwise the scan saw them all.
+        current = dict(account.get(unique_name, {}).get("ranks", {})) if merge else {}
+        current.update(clean)
+        current = {r: n for r, n in current.items() if n}
+        if current:
+            account[unique_name] = {"ranks": current}
+        else:
+            account.pop(unique_name, None)
+        result[unique_name] = {"ranks": current, "copies": arcane_copies(current)}
+    if not account:
+        all_arcanes.pop(account_id, None)
+    ARCANES_PATH.write_text(json.dumps(all_arcanes, indent=2))
+    return jsonify({"updated": result})
 
 
 @app.route("/api/users", methods=["GET"])

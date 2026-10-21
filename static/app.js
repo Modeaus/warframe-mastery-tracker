@@ -3,6 +3,7 @@
 const CATEGORY_ORDER = [
     "Warframes", "Primary", "Secondary", "Melee", "Robotic",
     "Companions", "Vehicles", "Arch-Gun", "Arch-Melee", "Amps",
+    "Ranking up", "Not owned",  // arcane groups
 ];
 
 function sortByCategoryOrder(categories) {
@@ -77,9 +78,81 @@ async function loadMastery(accountId) {
     currentAccountId = data.accountId;
     renderSummary(data);
     renderFarmingTargets(data.farmingTargets);
-    renderItemGroups("categories", data.missingByCategory, renderMissingRow, showMissingModal, "Nothing missing — full completion!");
+    renderItemGroups("categories", data.missingByCategory, renderMissingRow, showMissingModal, "Nothing missing — full completion!", isReadyToCraft);
     renderItemGroups("in-progress-categories", data.inProgressByCategory, renderProgressRow, showProgressModal, "Nothing in progress right now.");
     await renderPlayerList(data.accountId);
+    loadArcanes(data.accountId);
+}
+
+async function loadArcanes(accountId) {
+    const res = await fetch(`/api/arcanes?player=${encodeURIComponent(accountId)}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const summary = document.getElementById("arcane-summary");
+    const container = document.getElementById("arcane-groups");
+    if (!data.scanned) {
+        summary.textContent = "";
+        container.innerHTML = `<p class="section-hint">Nothing recorded yet &mdash; open Inventory &rarr; Arcanes in-game and press the scan button on each page.</p>`;
+        return;
+    }
+    const s = data.summary;
+    summary.textContent = `(${s.maxed} maxed · ${s.ranking} ranking up · ${s.notOwned} not owned)`;
+
+    const ranking = data.arcanes.filter(a => a.status === "ranking")
+        .sort((a, b) => a.copiesNeeded - b.copiesNeeded || a.name.localeCompare(b.name));
+    const notOwned = data.arcanes.filter(a => a.status === "notOwned");
+    const groups = {};
+    if (ranking.length) groups["Ranking up"] = ranking;
+    if (notOwned.length) groups["Not owned"] = notOwned;
+    renderItemGroups("arcane-groups", groups, renderArcaneRow, showArcaneModal, "Every arcane is maxed!");
+}
+
+function renderArcaneRow(a) {
+    const progress = a.status === "ranking"
+        ? `R${a.bestRank}/${a.maxRank} &middot; ${a.copies}/${a.copiesToMax} &middot; <strong>${a.copiesNeeded} to go</strong>`
+        : `${a.copiesToMax} copies to max`;
+    return `
+        <span class="item-row-main">
+            ${itemIconHtml(a.imageName, "item-icon-sm")}
+            <span class="item-name">${escapeHtml(a.name)}</span>
+        </span>
+        <span class="item-mastery-req">${progress}</span>
+    `;
+}
+
+function showArcaneModal(a) {
+    const modal = document.getElementById("item-modal");
+    const body = document.getElementById("modal-body");
+    const wikiUrl = safeWikiUrl(a.wikiaUrl);
+    const pct = Math.min(100, Math.round(100 * a.copies / a.copiesToMax));
+    const stacks = Object.entries(a.ranks || {})
+        .sort((x, y) => Number(y[0]) - Number(x[0]))
+        .map(([r, n]) => `${n}&times; R${r}`).join(", ");
+
+    const where = [];
+    for (const v of a.vendors) where.push(`<div class="source-row"><div class="source-location">${escapeHtml(v)}</div><div class="source-meta">Vendor</div></div>`);
+    for (const c of a.collections) where.push(`<div class="source-row"><div class="source-location">${escapeHtml(c)} Arcane Collection</div><div class="source-meta">Loid (Sanctum Anatomica) &middot; Vosfor</div></div>`);
+    for (const src of a.sources) where.push(`
+        <div class="source-row">
+            <div class="source-location">${escapeHtml(src.location)}</div>
+            <div class="source-meta">${escapeHtml(src.rarity) || ""}${src.chance != null ? ` &middot; ${src.chance}%` : ""}</div>
+        </div>`);
+    const more = a.sourceCount > a.sources.length
+        ? `<p class="section-hint">+${a.sourceCount - a.sources.length} lower-chance drop locations &mdash; see the wiki.</p>` : "";
+
+    body.innerHTML = `
+        <h2>${escapeHtml(a.name)}</h2>
+        <p class="item-mastery-req">${escapeHtml(a.type)}${a.rarity ? ` &middot; ${escapeHtml(a.rarity)}` : ""} &middot; max rank ${a.maxRank} (${a.copiesToMax} copies)</p>
+        <div class="progress-bar"><div class="progress-bar-fill" style="width: ${pct}%"></div></div>
+        <p class="source-meta">${a.copies} / ${a.copiesToMax} copies${stacks ? ` &mdash; you have ${stacks}` : ""}${a.copiesNeeded ? ` &middot; <strong>${a.copiesNeeded} more to max</strong>` : ""}</p>
+        <h3>Where to get it</h3>
+        ${where.length ? where.join("") : `<p>No drop or vendor data &mdash; check the wiki.</p>`}
+        ${more}
+        <p class="section-hint">Any arcane can also be rolled from Loid's collections by dissolving spares into Vosfor.</p>
+        ${wikiUrl ? `<a class="wiki-link" href="${escapeHtml(wikiUrl)}" target="_blank" rel="noopener noreferrer">View on Warframe Wiki &rarr;</a>` : ""}
+    `;
+    attachIconErrorFallback(body, "item-icon-sm");
+    modal.classList.remove("hidden");
 }
 
 function renderSummary(data) {
@@ -230,6 +303,13 @@ function renderFarmingTargets(targets) {
     });
 }
 
+// Every part with a drop source has been checked off as found.
+function isReadyToCraft(item) {
+    const components = new Set(item.sources.map(s => s.component));
+    const checked = new Set(item.checkedComponents || []);
+    return components.size > 0 && [...components].every(c => checked.has(c));
+}
+
 function renderMissingRow(item) {
     return `
         <span class="item-row-main">
@@ -253,7 +333,7 @@ function renderProgressRow(item) {
     `;
 }
 
-function renderItemGroups(containerId, byCategory, buildRowContent, onItemClick, emptyMessage) {
+function renderItemGroups(containerId, byCategory, buildRowContent, onItemClick, emptyMessage, isReady = () => false) {
     const container = document.getElementById(containerId);
     container.innerHTML = "";
 
@@ -265,12 +345,14 @@ function renderItemGroups(containerId, byCategory, buildRowContent, onItemClick,
 
     for (const cat of categories) {
         const items = byCategory[cat];
+        const readyCount = items.filter(isReady).length;
         const catEl = document.createElement("div");
         catEl.className = "category";
         catEl.innerHTML = `
             <div class="category-header">
                 <span class="category-count">${items.length}</span>
                 <h2>${escapeHtml(cat)}</h2>
+                ${readyCount ? `<span class="ready-badge" title="All parts found — ready to craft">${readyCount} ready</span>` : ""}
             </div>
             <div class="category-items"></div>
         `;
@@ -281,7 +363,8 @@ function renderItemGroups(containerId, byCategory, buildRowContent, onItemClick,
         const itemsEl = catEl.querySelector(".category-items");
         for (const item of items) {
             const row = document.createElement("div");
-            row.className = "item-row";
+            row.className = isReady(item) ? "item-row ready-to-craft" : "item-row";
+            if (isReady(item)) row.title = "All parts found — ready to craft";
             row.innerHTML = buildRowContent(item);
             row.addEventListener("click", () => onItemClick(item));
             attachIconErrorFallback(row, "item-icon-sm");
@@ -336,6 +419,11 @@ function showMissingModal(item) {
     const components = Array.from(byComponent.keys());
 
     const checkedComponents = new Set(item.checkedComponents || []);
+    const required = c => (item.componentCounts || {})[c] || 1;
+    const found = c => (item.foundCounts || {})[c] || 0;
+    // "Blade 1/2" for parts the recipe needs more than one of.
+    const chipLabel = c => required(c) > 1 ? `${c} ${found(c)}/${required(c)}` : c;
+    const chipState = c => checkedComponents.has(c) ? " checked-off" : (found(c) > 0 ? " partial" : "");
 
     const filterChips = components.length > 1
         ? `<div class="component-filter">
@@ -344,7 +432,7 @@ function showMissingModal(item) {
                    <span class="component-chip-group">
                        <input type="checkbox" class="component-checkbox" data-component="${escapeHtml(c)}"
                               ${checkedComponents.has(c) ? "checked" : ""} title="Mark as already found (removes it from Targeted Farming)" />
-                       <button type="button" class="component-chip${checkedComponents.has(c) ? " checked-off" : ""}" data-component="${escapeHtml(c)}">${escapeHtml(c)}</button>
+                       <button type="button" class="component-chip${chipState(c)}" data-component="${escapeHtml(c)}">${escapeHtml(chipLabel(c))}</button>
                    </span>
                `).join("")}
            </div>
@@ -393,8 +481,14 @@ function showMissingModal(item) {
 
             const result = await res.json();
             item.checkedComponents = result.checkedComponents;
+            item.foundCounts = result.foundCounts;
+            checkedComponents.clear();
+            result.checkedComponents.forEach(c => checkedComponents.add(c));
             const chipBtn = body.querySelector(`.component-chip[data-component="${CSS.escape(component)}"]`);
-            if (chipBtn) chipBtn.classList.toggle("checked-off", wasChecked);
+            if (chipBtn) {
+                chipBtn.className = `component-chip${chipState(component)}${chipBtn.classList.contains("active") ? " active" : ""}`;
+                chipBtn.textContent = chipLabel(component);
+            }
 
             // Refresh the rest of the page (Targeted Farming in particular)
             // in the background without closing this modal.
